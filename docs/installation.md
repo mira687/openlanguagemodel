@@ -33,12 +33,16 @@ pip install -e ".[docs]"
 
 OLM v2.2 requires:
 
-- `torch>=2.1.0`
+- `torch>=2.3.0`
 - `transformers>=4.57.1`
-- `datasets>=2.0.0`
-- `numpy>=1.20.0`
+- `datasets>=2.16.0`
+- `numpy>=1.21.2`
 - `tqdm>=4.60.0`
 - `pyyaml>=6.0`
+
+These are floors the test suite is actually run against, not guesses — see the
+`minimum-versions` CI job. `pyproject.toml` is the authoritative copy; if the two
+ever disagree, trust it over this page.
 
 ## Verify The Install
 

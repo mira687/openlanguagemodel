@@ -2,9 +2,11 @@ name: Python package
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
+  # CONTRIBUTING directs all pull requests at `dev`, so listing only `main` here
+  # meant no contribution was ever tested before it was merged.
   pull_request:
-    branches: [main]
+    branches: [main, dev]
   workflow_dispatch:
 
 jobs:
@@ -41,6 +43,10 @@ jobs:
         with:
           python-version: "3.10"
       - uses: astral-sh/setup-uv@v5
+      # A stale uv.lock cannot be consumed reproducibly: `uv sync --locked` fails
+      # and `--frozen` silently keeps the old metadata.
+      - name: Check uv.lock is in sync with pyproject.toml
+        run: uv lock --check
       # The `tests` job always resolves the newest releases, so a dependency floor
       # declared lower than the code actually needs goes unnoticed. This job pins
       # every direct dependency to its declared minimum instead.
