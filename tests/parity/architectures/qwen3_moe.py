@@ -1,0 +1,147 @@
+"""Qwen3 (flagship MoE) vs ``transformers.Qwen3MoeForCausalLM``.
+
+The only sparse architecture in the suite, and the only one with QK-norm. Both
+are worth pinning down: MoE routing is easy to get subtly wrong, and a routing
+difference shows up as a large logit difference rather than a small one.
+
+OLM's router and Qwen3's agree on ordering -- softmax over *all* experts, then
+top-k, then renormalise over the selected k -- so no transform is needed on the
+gate. Expert weights map one-for-one, with the same gated-MLP half-swap as the
+dense Llama family.
+"""
+
+from __future__ import annotations
+
+from olm.models.alibaba.qwen3 import Qwen3Model
+from transformers import Qwen3MoeConfig, Qwen3MoeForCausalLM
+
+from .._spec import MapEntry, ParityCase, cat_rows, rope_permute
+
+VOCAB = 61
+EMBED = 64
+MOE_INTERMEDIATE = 24
+LAYERS = 2
+HEADS = 4
+KV_HEADS = 2
+HEAD_DIM = 16
+MAX_SEQ = 32
+NUM_EXPERTS = 4
+TOP_K = 2
+ROPE_THETA = 1000000.0
+RMS_EPS = 1e-6
+
+
+def _config() -> Qwen3MoeConfig:
+    return Qwen3MoeConfig(
+        vocab_size=VOCAB,
+        hidden_size=EMBED,
+        intermediate_size=MOE_INTERMEDIATE,
+        moe_intermediate_size=MOE_INTERMEDIATE,
+        num_hidden_layers=LAYERS,
+        num_attention_heads=HEADS,
+        num_key_value_heads=KV_HEADS,
+        head_dim=HEAD_DIM,
+        num_experts=NUM_EXPERTS,
+        num_experts_per_tok=TOP_K,
+        # Every layer is sparse in Qwen3-235B-A22B, which is what OLM models.
+        decoder_sparse_step=1,
+        mlp_only_layers=[],
+        norm_topk_prob=True,
+        max_position_embeddings=MAX_SEQ,
+        rope_theta=ROPE_THETA,
+        rms_norm_eps=RMS_EPS,
+        hidden_act="silu",
+        attention_dropout=0.0,
+        use_sliding_window=False,
+        pad_token_id=None,
+        tie_word_embeddings=False,
+        attn_implementation="eager",
+    )
+
+
+def _build_map(olm, hf) -> list[MapEntry]:
+    q_perm = rope_permute(HEADS, HEAD_DIM)
+    k_perm = rope_permute(KV_HEADS, HEAD_DIM)
+    # A single head's worth of the same permutation, for the per-head QK-norm.
+    head_perm = rope_permute(1, HEAD_DIM)
+
+    entries = [
+        MapEntry("blocks.0.embedding.weight", "model.embed_tokens.weight"),
+        MapEntry("blocks.2.weight", "model.norm.weight"),
+        MapEntry("blocks.3.blocks.1.weight", "lm_head.weight"),
+    ]
+
+    for i in range(LAYERS):
+        o = f"blocks.1.stack.{i}"
+        h = f"model.layers.{i}"
+        attn, moe = f"{o}.blocks.0.block", f"{o}.blocks.1.block"
+
+        entries += [
+            MapEntry(f"{attn}.blocks.0.weight", f"{h}.input_layernorm.weight"),
+            MapEntry(f"{attn}.blocks.1.q_proj.weight", f"{h}.self_attn.q_proj.weight", q_perm),
+            MapEntry(f"{attn}.blocks.1.k_proj.weight", f"{h}.self_attn.k_proj.weight", k_perm),
+            MapEntry(f"{attn}.blocks.1.v_proj.weight", f"{h}.self_attn.v_proj.weight"),
+            MapEntry(f"{attn}.blocks.1.out_proj.weight", f"{h}.self_attn.o_proj.weight"),
+            # QK-norm is applied per head *after* the Q/K projection and before
+            # RoPE, so on the OLM side it sees the head axis already in the
+            # interleaved layout. Its per-head scale must be permuted to match.
+            # A forward-only check cannot catch this: transformers initialises
+            # these scales to exactly ones, and a constant vector is invariant
+            # under permutation.
+            MapEntry(
+                f"{attn}.blocks.1.q_norm.weight",
+                f"{h}.self_attn.q_norm.weight",
+                head_perm,
+            ),
+            MapEntry(
+                f"{attn}.blocks.1.k_norm.weight",
+                f"{h}.self_attn.k_norm.weight",
+                head_perm,
+            ),
+            MapEntry(f"{moe}.blocks.0.weight", f"{h}.post_attention_layernorm.weight"),
+            MapEntry(f"{moe}.blocks.1.router.gate.weight", f"{h}.mlp.gate.weight"),
+        ]
+
+        for e in range(NUM_EXPERTS):
+            entries += [
+                MapEntry(
+                    f"{moe}.blocks.1.experts.{e}.up_proj.weight",
+                    (
+                        f"{h}.mlp.experts.{e}.up_proj.weight",
+                        f"{h}.mlp.experts.{e}.gate_proj.weight",
+                    ),
+                    cat_rows,
+                ),
+                MapEntry(
+                    f"{moe}.blocks.1.experts.{e}.down_proj.weight",
+                    f"{h}.mlp.experts.{e}.down_proj.weight",
+                ),
+            ]
+
+    return entries
+
+
+CASES = [
+    ParityCase(
+        name="qwen3-moe",
+        reference="Qwen3MoeForCausalLM",
+        build_hf=lambda: Qwen3MoeForCausalLM(_config()),
+        build_olm=lambda: Qwen3Model(
+            vocab_size=VOCAB,
+            embed_dim=EMBED,
+            moe_intermediate_size=MOE_INTERMEDIATE,
+            num_layers=LAYERS,
+            num_heads=HEADS,
+            num_kv_heads=KV_HEADS,
+            max_seq_len=MAX_SEQ,
+            num_experts=NUM_EXPERTS,
+            top_k=TOP_K,
+            head_dim=HEAD_DIM,
+            rope_theta=ROPE_THETA,
+            rms_norm_eps=RMS_EPS,
+            tie_weights=False,
+        ),
+        build_map=_build_map,
+        notes="Sparse top-k MoE routing plus per-head QK-norm.",
+    ),
+]
