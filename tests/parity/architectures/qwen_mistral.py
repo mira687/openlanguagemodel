@@ -121,6 +121,21 @@ CASES = [
             head_dim=HEAD_DIM,
             tied_embeddings=False,
         ),
-        notes="Untied output head, so lm_head is mapped as its own parameter.",
+        notes=(
+            "Untied output head, so lm_head is mapped as its own parameter. "
+            "Attention geometry is the conventional head_dim = embed_dim / "
+            "num_heads; see reference_deviations -- the released checkpoint's "
+            "head_dim cannot currently be expressed by OLM's preset."
+        ),
+        reference_deviations=(
+            "head_dim is derived as embed_dim / num_heads. The released "
+            "Mistral-Small-3.1-24B config sets an explicit head_dim=128 with "
+            "hidden_size=5120 and 32 query heads, so q_proj is 4096 wide rather "
+            "than 5120. MistralSmall3_1_Model takes no head_dim argument, so its "
+            "24B preset derives 160-dimensional heads and cannot reproduce the "
+            "released projection shapes. This case therefore validates the block "
+            "graph, not the advertised preset's geometry. Tracked upstream; "
+            "compare Qwen3Model, which does accept head_dim.",
+        ),
     ),
 ]

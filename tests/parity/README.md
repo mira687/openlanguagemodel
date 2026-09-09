@@ -76,6 +76,16 @@ The gradient is what makes this a test of *training* equivalence and not just
 inference equivalence, and it is strictly the most sensitive of the three — see
 "Why gradients matter" below.
 
+One limit on that claim, worth stating plainly: the objective compared is
+next-token cross entropy and nothing else. Where a reference model adds a second
+term to its training loss, that term is outside this suite. The concrete case is
+`qwen3-moe`: the router load-balancing auxiliary loss is not compared, because
+OLM's `Qwen3Model` discards router logits and so cannot produce it. Load
+balancing is exactly what keeps an MoE router from collapsing onto a few
+experts, so agreement here does not by itself establish that MoE *training*
+matches. Any case with this kind of gap records it in `reference_deviations` and
+`RESULTS.md` reprints it.
+
 ## How it works
 
 1. Build the `transformers` reference from a tiny config: 2 layers, hidden 64,

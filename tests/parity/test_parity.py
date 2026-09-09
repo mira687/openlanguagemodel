@@ -18,6 +18,7 @@ from ._harness import (
     load_reference_weights,
     randomize_degenerate_parameters,
     run_parity,
+    set_determinism,
 )
 from ._spec import ParityCase
 from .architectures import ALL_CASES, CASES_BY_NAME
@@ -129,8 +130,10 @@ def test_harness_detects_a_broken_mapping() -> None:
 
     from ._spec import MapEntry
 
-    case = llama_module.CASES[2]
-    assert case.name == "llama3"
+    # Selected by name, not by index: the index shifts whenever a case is added
+    # to llama.py, and silently running this negative control against a
+    # different architecture than the docstring claims would defeat its purpose.
+    case = next(c for c in llama_module.CASES if c.name == "llama3")
 
     def broken_map(olm, hf) -> list[MapEntry]:
         return [
@@ -202,3 +205,35 @@ def test_reference_weights_actually_land_in_the_olm_model() -> None:
     expected = entry.apply(*[hf_params[n].detach() for n in entry.hf_names])
     assert torch.equal(after, expected)
     assert not torch.equal(after, before)
+
+
+def test_suite_does_not_leak_global_torch_settings() -> None:
+    """The parity fixtures must not change torch's global state for later tests.
+
+    ``set_determinism`` flips three process-global switches. If they are not put
+    back, every test that runs after this package in a full session inherits
+    deterministic algorithms and disabled cuDNN autotuning, which silently
+    changes kernel selection and performance elsewhere. This asserts the
+    restore covers all three, not just the thread count.
+    """
+    from .conftest import preserved_torch_globals
+
+    def snapshot():
+        return (
+            torch.are_deterministic_algorithms_enabled(),
+            torch.is_deterministic_algorithms_warn_only_enabled(),
+            torch.backends.cudnn.benchmark,
+            torch.get_num_threads(),
+        )
+
+    # Start from the opposite of what the suite sets, so a restore that merely
+    # hardcoded torch's defaults would fail here too.
+    torch.use_deterministic_algorithms(False)
+    torch.backends.cudnn.benchmark = True
+    baseline = snapshot()
+
+    with preserved_torch_globals():
+        set_determinism()
+        assert snapshot() != baseline, "set_determinism did not change anything"
+
+    assert snapshot() == baseline

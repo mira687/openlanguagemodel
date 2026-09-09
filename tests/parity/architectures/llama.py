@@ -3,6 +3,16 @@
 Llama 2 is registered twice so that both OLM attention paths are exercised:
 ``Llama2Block`` picks ``FlashAttentionwithRoPE`` when ``num_kv_heads ==
 num_heads`` and ``GroupedQueryAttention`` otherwise.
+
+The output head is deliberately **untied** in the main cases. Released Llama 2
+and Llama 3 checkpoints set ``tie_word_embeddings=False``, so an independent
+``lm_head`` is the configuration that actually ships. Tying it would collapse
+the embedding and the output projection into one parameter, and
+``llama_family_map`` then has no ``lm_head.weight`` entry to carry -- meaning
+the coverage check, the logit comparison and the gradient comparison would all
+skip the output-head path entirely, and a conversion bug there could still
+report clean parity. One tied case is kept alongside them so that path stays
+covered too.
 """
 
 from __future__ import annotations
@@ -23,7 +33,13 @@ MAX_SEQ = 32
 HEAD_DIM = EMBED // HEADS
 
 
-def _config(*, num_kv_heads: int, rope_theta: float, rms_eps: float) -> LlamaConfig:
+def _config(
+    *,
+    num_kv_heads: int,
+    rope_theta: float,
+    rms_eps: float,
+    tie_embeddings: bool = False,
+) -> LlamaConfig:
     return LlamaConfig(
         vocab_size=VOCAB,
         hidden_size=EMBED,
@@ -36,18 +52,19 @@ def _config(*, num_kv_heads: int, rope_theta: float, rms_eps: float) -> LlamaCon
         rms_norm_eps=rms_eps,
         hidden_act="silu",
         attention_bias=False,
-        tie_word_embeddings=True,
+        tie_word_embeddings=tie_embeddings,
         attn_implementation="eager",
     )
 
 
-def _map(num_kv_heads: int):
+def _map(num_kv_heads: int, *, tied_embeddings: bool = False):
     def build(olm, hf):
         return llama_family_map(
             num_layers=LAYERS,
             num_heads=HEADS,
             num_kv_heads=num_kv_heads,
             head_dim=HEAD_DIM,
+            tied_embeddings=tied_embeddings,
         )
 
     return build
@@ -73,9 +90,13 @@ CASES = [
             num_kv_heads=HEADS,
             max_seq_len=MAX_SEQ,
             rope_theta=10000.0,
+            tie_weights=False,
         ),
         build_map=_map(HEADS),
-        notes="Exercises OLM's FlashAttentionwithRoPE path (multi-head).",
+        notes=(
+            "Exercises OLM's FlashAttentionwithRoPE path (multi-head), with an "
+            "untied output head as in released Llama 2 checkpoints."
+        ),
     ),
     ParityCase(
         name="llama2-gqa",
@@ -92,9 +113,43 @@ CASES = [
             num_kv_heads=2,
             max_seq_len=MAX_SEQ,
             rope_theta=10000.0,
+            tie_weights=False,
         ),
         build_map=_map(2),
         notes="Exercises OLM's GroupedQueryAttention path.",
+    ),
+    ParityCase(
+        name="llama2-mha-tied",
+        reference="LlamaForCausalLM (tie_word_embeddings=True)",
+        build_hf=lambda: LlamaForCausalLM(
+            _config(
+                num_kv_heads=HEADS,
+                rope_theta=10000.0,
+                rms_eps=RMS_EPS,
+                tie_embeddings=True,
+            )
+        ),
+        build_olm=lambda: Llama2Model(
+            vocab_size=VOCAB,
+            embed_dim=EMBED,
+            intermediate_size=INTERMEDIATE,
+            num_layers=LAYERS,
+            num_heads=HEADS,
+            num_kv_heads=HEADS,
+            max_seq_len=MAX_SEQ,
+            rope_theta=10000.0,
+            tie_weights=True,
+        ),
+        build_map=_map(HEADS, tied_embeddings=True),
+        notes=(
+            "Covers OLM's tied-output-head path, where the embedding matrix is "
+            "reused as the projection. Released Llama checkpoints are untied, so "
+            "this is a configuration check rather than a checkpoint check."
+        ),
+        reference_deviations=(
+            "tie_word_embeddings=True, whereas released Llama 2/3 checkpoints "
+            "leave the output head untied.",
+        ),
     ),
     ParityCase(
         name="llama3",
@@ -111,6 +166,7 @@ CASES = [
             num_kv_heads=2,
             max_seq_len=MAX_SEQ,
             rope_theta=500000.0,
+            tie_weights=False,
         ),
         build_map=_map(2),
         notes=(

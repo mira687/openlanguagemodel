@@ -142,6 +142,24 @@ CASES = [
             tie_weights=False,
         ),
         build_map=_build_map,
-        notes="Sparse top-k MoE routing plus per-head QK-norm.",
+        notes=(
+            "Sparse top-k MoE routing plus per-head QK-norm. Compared on the "
+            "language-model loss only -- see reference_deviations for why the "
+            "router auxiliary objective is out of scope here."
+        ),
+        reference_deviations=(
+            "The router load-balancing auxiliary loss is NOT compared. Both "
+            "sides are scored with plain next-token cross entropy computed from "
+            "logits, which excludes the auxiliary objective and its router "
+            "gradients. Qwen3MoeForCausalLM can return router logits and add its "
+            "configured aux loss, but OLM's Qwen3Model routes through "
+            "SwiGLUMoEFFN -> MoEFeedForwardBase, whose forward() returns only the "
+            "output tensor and discards the router logits, so there is nothing to "
+            "compare against. Read this case as forward and LM-loss parity, not "
+            "as evidence that real MoE training is equivalent: with no aux loss "
+            "the two can agree here and still diverge in practice, since load "
+            "balancing is what stops the router collapsing onto a few experts. "
+            "OLM's newer olm.nn.moe.MoEFFN does return router logits.",
+        ),
     ),
 ]
