@@ -19,13 +19,27 @@ tested, or easier to teach from are especially welcome.
 
 Use Python 3.10, 3.11, or 3.12.
 
+Unless you have write access to this repository, fork it first — you will not be
+able to push a branch to the official repository, and the pull request flow below
+assumes you are pushing to your own fork.
+
 ```bash
-git clone https://github.com/openlanguagemodel/openlanguagemodel.git
+# Fork https://github.com/openlanguagemodel/openlanguagemodel on GitHub, then:
+git clone https://github.com/<your-username>/openlanguagemodel.git
 cd openlanguagemodel
+git remote add upstream https://github.com/openlanguagemodel/openlanguagemodel.git
+git fetch upstream
+
 python -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
 ```
+
+That leaves `origin` pointing at your fork (where you push) and `upstream` at the
+official repository (where you pull from and open pull requests against).
+
+If you do have write access, you can clone the official repository directly and
+skip the `upstream` remote.
 
 On Windows, activate the environment with:
 
@@ -51,12 +65,23 @@ npm run build
 
 ## Pull Request Flow
 
-1. Create a branch from `dev` for normal development work.
+1. Sync with `dev` and branch from it:
+
+   ```bash
+   git fetch upstream
+   git checkout -b my-change upstream/dev
+   ```
+
 2. Keep the change focused. Small PRs are easier to review and merge.
 3. Add or update tests when behavior changes.
 4. Update docs when public APIs, examples, installation, or training behavior
    changes.
-5. Open a pull request into `dev`.
+5. Push the branch to your fork and open a pull request into `dev`:
+
+   ```bash
+   git push -u origin my-change
+   ```
+
 6. Fill out the pull request template and link related issues.
 
 `main` is reserved for stable release rollouts. Maintainers merge `dev` into
