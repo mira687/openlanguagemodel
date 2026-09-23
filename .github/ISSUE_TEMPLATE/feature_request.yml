@@ -29,7 +29,6 @@ body:
       options:
         - documentation/examples
         - API polish
-        - bug fix
         - model family
         - training feature
         - education/course support

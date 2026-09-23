@@ -3,6 +3,10 @@ description: Share feedback from using OLM in a course, workshop, or study group
 title: "[Education]: "
 labels: ["documentation"]
 body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for teaching with OLM. This issue is public, so please leave out student names and anything else that identifies individual learners.
   - type: textarea
     id: context
     attributes:

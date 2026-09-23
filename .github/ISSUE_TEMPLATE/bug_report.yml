@@ -26,7 +26,8 @@ body:
     id: version
     attributes:
       label: OLM version
-      placeholder: "2.2.0, main, or a commit hash"
+      description: Output of `pip show openlanguagemodel`, or the commit hash if installed from source.
+      placeholder: "2.2.1, dev, or a commit hash"
     validations:
       required: true
   - type: input
@@ -39,6 +40,11 @@ body:
     attributes:
       label: PyTorch version
       placeholder: "torch.__version__"
+  - type: input
+    id: device
+    attributes:
+      label: OS and device
+      placeholder: "Ubuntu 22.04, CUDA 12.4 on 2x A100 / macOS MPS / CPU only"
   - type: dropdown
     id: area
     attributes:
