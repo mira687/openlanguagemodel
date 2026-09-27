@@ -37,12 +37,13 @@ OLM v2.2 requires:
 - `transformers>=4.57.1`
 - `datasets>=2.16.0`
 - `numpy>=1.21.2`
-- `tqdm>=4.60.0`
+- `tqdm>=4.62.1`
 - `pyyaml>=6.0`
 
-These are floors the test suite is actually run against, not guesses — see the
-`minimum-versions` CI job. `pyproject.toml` is the authoritative copy; if the two
-ever disagree, trust it over this page.
+CI installs the lowest versions a resolver picks for these floors (the
+`minimum-versions` job); transitive requirements can still lift a package such
+as numpy slightly above its floor. `pyproject.toml` is the authoritative copy;
+if the two ever disagree, trust it over this page.
 
 ## Verify The Install
 

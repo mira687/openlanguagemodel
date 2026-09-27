@@ -46,7 +46,7 @@ dependencies = [
     # numpy 1.20.x ships no cp310 wheels; 1.21.2 is the first release that
     # supports this project's minimum Python (3.10).
     "numpy>=1.21.2",
-    "tqdm>=4.60.0",
+    "tqdm>=4.62.1",
     "pyyaml>=6.0",
     "transformers>=4.57.1",
     # datasets < 2.16 imports `HfFolder` from huggingface_hub, which hub 1.0

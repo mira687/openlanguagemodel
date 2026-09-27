@@ -1482,7 +1482,7 @@ requires-dist = [
     { name = "sphinx-markdown-builder", marker = "extra == 'dev'", specifier = ">=0.6.0" },
     { name = "sphinx-markdown-builder", marker = "extra == 'docs'", specifier = ">=0.6.0" },
     { name = "torch", specifier = ">=2.3.0" },
-    { name = "tqdm", specifier = ">=4.60.0" },
+    { name = "tqdm", specifier = ">=4.62.1" },
     { name = "transformers", specifier = ">=4.57.1" },
     { name = "twine", marker = "extra == 'dev'" },
     { name = "wandb", marker = "extra == 'wandb'", specifier = ">=0.16.0" },
