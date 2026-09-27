@@ -29,7 +29,11 @@ ROPE_THETA = 10000.0
 SLIDING_WINDOW = 8
 ATTN_SOFTCAP = 50.0
 FINAL_SOFTCAP = 30.0
-QUERY_PRE_ATTN_SCALAR = 16.0
+# int, because transformers 5.x validates this field as `int` and 16.0 raises
+# StrictDataclassFieldValidationError; and != HEAD_DIM so that the query scale is
+# actually exercised -- at 16 == HEAD_DIM, `query_pre_attn_scalar**-0.5` equals
+# the default 1/sqrt(head_dim) and dropping it entirely is bit-identical.
+QUERY_PRE_ATTN_SCALAR = 24
 
 
 def _config(activation: str) -> Gemma2Config:

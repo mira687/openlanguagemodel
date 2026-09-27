@@ -6,12 +6,14 @@ difference shows up as a large logit difference rather than a small one.
 
 OLM's router and Qwen3's agree on ordering -- softmax over *all* experts, then
 top-k, then renormalise over the selected k -- so no transform is needed on the
-gate. Expert weights map one-for-one, with the same gated-MLP half-swap as the
-dense Llama family.
+gate. Expert weights carry the same gated-MLP half-swap as the dense Llama
+family, from either of the two reference layouts: one Linear per expert before
+transformers 5, or two fused 3-D tensors per layer from 5 on.
 """
 
 from __future__ import annotations
 
+import torch
 from olm.models.alibaba.qwen3 import Qwen3Model
 from transformers import Qwen3MoeConfig, Qwen3MoeForCausalLM
 
@@ -56,6 +58,10 @@ def _config() -> Qwen3MoeConfig:
         pad_token_id=None,
         tie_word_embeddings=False,
         attn_implementation="eager",
+        # The default grouped-mm expert kernel rejects Double, so the float64
+        # case dies with "Expected mat_a to be Float32, BFloat16 or Float16
+        # matrix, got Double" without this. Same intent as attn_implementation.
+        experts_implementation="eager",
     )
 
 
@@ -64,6 +70,15 @@ def _build_map(olm, hf) -> list[MapEntry]:
     k_perm = rope_permute(KV_HEADS, HEAD_DIM)
     # A single head's worth of the same permutation, for the per-head QK-norm.
     head_perm = rope_permute(1, HEAD_DIM)
+
+    # transformers >= 5 fuses the experts into two 3-D tensors per layer --
+    # `mlp.experts.gate_up_proj` [E, 2I, H] in (gate, up) row order and
+    # `mlp.experts.down_proj` [E, H, I] -- instead of one Linear per expert.
+    # #77 adds a minimum-versions job at transformers 4.57.1, which still has
+    # the unfused layout, so both have to be supported. Detected from the
+    # reference's own parameter names rather than a version check.
+    hf_params = dict(hf.named_parameters())
+    fused_experts = "model.layers.0.mlp.experts.gate_up_proj" in hf_params
 
     entries = [
         MapEntry("blocks.0.embedding.weight", "model.embed_tokens.weight"),
@@ -103,20 +118,42 @@ def _build_map(olm, hf) -> list[MapEntry]:
         ]
 
         for e in range(NUM_EXPERTS):
-            entries += [
-                MapEntry(
-                    f"{moe}.blocks.1.experts.{e}.up_proj.weight",
-                    (
-                        f"{h}.mlp.experts.{e}.up_proj.weight",
-                        f"{h}.mlp.experts.{e}.gate_proj.weight",
+            if fused_experts:
+                entries += [
+                    MapEntry(
+                        f"{moe}.blocks.1.experts.{e}.up_proj.weight",
+                        f"{h}.mlp.experts.gate_up_proj",
+                        # Slice out expert e, then the same half-swap as the
+                        # unfused path: the reference stores (gate, up) and
+                        # OLM's fused tensor is (up, gate). Linear, so it is
+                        # also the correct gradient transform.
+                        lambda t, e=e: torch.cat(
+                            [t[e, MOE_INTERMEDIATE:], t[e, :MOE_INTERMEDIATE]]
+                        ).contiguous(),
+                        note="fused [E, 2I, H] experts (transformers >= 5)",
                     ),
-                    cat_rows,
-                ),
-                MapEntry(
-                    f"{moe}.blocks.1.experts.{e}.down_proj.weight",
-                    f"{h}.mlp.experts.{e}.down_proj.weight",
-                ),
-            ]
+                    MapEntry(
+                        f"{moe}.blocks.1.experts.{e}.down_proj.weight",
+                        f"{h}.mlp.experts.down_proj",
+                        lambda t, e=e: t[e].contiguous(),
+                        note="fused [E, H, I] experts (transformers >= 5)",
+                    ),
+                ]
+            else:
+                entries += [
+                    MapEntry(
+                        f"{moe}.blocks.1.experts.{e}.up_proj.weight",
+                        (
+                            f"{h}.mlp.experts.{e}.up_proj.weight",
+                            f"{h}.mlp.experts.{e}.gate_proj.weight",
+                        ),
+                        cat_rows,
+                    ),
+                    MapEntry(
+                        f"{moe}.blocks.1.experts.{e}.down_proj.weight",
+                        f"{h}.mlp.experts.{e}.down_proj.weight",
+                    ),
+                ]
 
     return entries
 
