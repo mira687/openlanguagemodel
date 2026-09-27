@@ -30,7 +30,8 @@ class AbsolutePositionalEmbedding(PositionalEmbeddingBase):
             embed_dim: dimension of the positional embeddings
             dropout: dropout probability applied to positional embeddings
             init_std: standard deviation of the normal initializer (0.02, as in
-                the GPT-2 reference implementation)
+                Hugging Face GPT-2 and nanoGPT; OpenAI's original release used
+                0.01 for positions)
         """
         super().__init__()
         self.max_seq_len = max_seq_len

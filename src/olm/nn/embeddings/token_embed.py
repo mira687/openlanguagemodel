@@ -30,6 +30,8 @@ class Embedding(nn.Module):
         """
         super().__init__()
         self.embedding = nn.Embedding(vocab_size, embedding_dim)
+        # Applied once here, so a later ``self.embedding.reset_parameters()`` (the
+        # usual meta-device/FSDP init path) would redraw N(0, 1) and undo this.
         nn.init.normal_(self.embedding.weight, mean=0.0, std=init_std)
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
