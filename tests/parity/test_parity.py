@@ -4,7 +4,9 @@ Run with::
 
     pytest tests/parity -q
 
-Everything is CPU-only, offline, and randomly initialised at a tiny scale.
+Everything is CPU-only, offline, and randomly initialised at a tiny scale, with
+the reference's matrix weights scaled up so that the non-linear features under
+test actually affect the output (see ``_harness.WEIGHT_SCALE``).
 """
 
 from __future__ import annotations
@@ -13,15 +15,18 @@ import pytest
 import torch
 
 from ._harness import (
+    WEIGHT_SCALE,
     causal_lm_loss,
     check_coverage,
     load_reference_weights,
     randomize_degenerate_parameters,
     run_parity,
+    scale_reference_weights,
     set_determinism,
 )
 from ._spec import ParityCase
 from .architectures import ALL_CASES, CASES_BY_NAME
+from .architectures import gemma2 as gemma2_module
 from .architectures import llama as llama_module
 
 #: Cases whose reference is deliberately left at a default that OLM does not
@@ -34,13 +39,32 @@ DIVERGENT_CASES = [c for c in ALL_CASES if c.name in KNOWN_DIVERGENT]
 
 DTYPES = [torch.float64, torch.float32]
 
-#: Tolerances are set well above the largest value the suite actually measures
-#: (~3e-7), and are deliberately *not* tuned per architecture. OLM's LayerNorm
-#: and RMSNorm both upcast to float32 internally and cast back, so float64 runs
-#: cannot resolve below roughly float32 epsilon either; both dtypes therefore
-#: share one tolerance.
-LOGIT_TOL = 1e-5
-LOSS_TOL = 1e-6
+#: Tolerances are **relative**, and deliberately not tuned per architecture.
+#: An absolute logit bound is not a statement about anything durable: the same
+#: correct code measures a different absolute difference when the init scale,
+#: the config or the platform changes, because what is being measured is
+#: float32 rounding at the size of the logits. Dividing by the reference's own
+#: ``max |logit|`` removes exactly that dependence.
+#:
+#: OLM's LayerNorm and RMSNorm both upcast to float32 internally and cast back,
+#: so float64 runs cannot resolve below roughly float32 epsilon either; both
+#: dtypes therefore share one tolerance.
+#:
+#: 1e-5 is where the measurements put it: across all 11 matching cases and both
+#: dtypes the worst relative logit difference is 6.1e-7, and the weakest of the
+#: feature mutations in ``FEATURE_MUTATIONS`` below is 1.6e-4. The bound sits
+#: about 16x above every correct case and 16x below every broken one.
+REL_LOGIT_TOL = 1e-5
+
+#: The loss is a mean over ``batch * (seq_len - 1)`` positions, so it averages
+#: logit disagreement away and is the less sensitive of the two; it is here to
+#: catch a loss path that differs by more than rounding, not to detect features.
+#: 1e-6 relative sits between the worst matching case (1.1e-7) and the smallest
+#: real divergence the suite contains (``gemma2-stock``, 9.7e-6). In absolute
+#: terms it is about eight float32 ulps of a loss near ln 61 = 4.1; the previous
+#: absolute 1e-6 was two ulps, and ``gpt2`` already measured one.
+REL_LOSS_TOL = 1e-6
+
 GRAD_COSINE_TOL = 1e-9
 
 
@@ -66,14 +90,17 @@ def test_weight_map_is_complete(case: ParityCase) -> None:
 def test_matches_reference(case: ParityCase, dtype: torch.dtype) -> None:
     result = run_parity(case, dtype=dtype)
 
-    assert result.max_abs_logit_diff < LOGIT_TOL, (
-        f"{case.name}/{result.dtype}: max |logit difference| "
-        f"{result.max_abs_logit_diff:.3e} exceeds {LOGIT_TOL:.0e} "
-        f"(reference logit scale {result.logit_scale:.3f})"
+    assert result.rel_logit_diff < REL_LOGIT_TOL, (
+        f"{case.name}/{result.dtype}: max |logit difference| / max |logit| "
+        f"{result.rel_logit_diff:.3e} exceeds {REL_LOGIT_TOL:.0e} "
+        f"({result.max_abs_logit_diff:.3e} absolute, reference logit scale "
+        f"{result.logit_scale:.3f}, reference weights x{result.weight_scale:g})"
     )
-    assert result.max_abs_loss_diff < LOSS_TOL, (
-        f"{case.name}/{result.dtype}: max |loss difference| "
-        f"{result.max_abs_loss_diff:.3e} exceeds {LOSS_TOL:.0e}"
+    assert result.rel_loss_diff < REL_LOSS_TOL, (
+        f"{case.name}/{result.dtype}: max |loss difference| / loss "
+        f"{result.rel_loss_diff:.3e} exceeds {REL_LOSS_TOL:.0e} "
+        f"({result.max_abs_loss_diff:.3e} absolute on a loss of "
+        f"{result.loss_scale:.4f})"
     )
     assert result.grad_cosine_sim > 1.0 - GRAD_COSINE_TOL, (
         f"{case.name}/{result.dtype}: gradient cosine similarity "
@@ -152,6 +179,105 @@ def test_harness_detects_a_broken_mapping() -> None:
     )
 
 
+# --------------------------------------------------------------------------
+# Per-feature negative controls
+# --------------------------------------------------------------------------
+
+
+def _gemma2_with(name: str, **overrides) -> ParityCase:
+    """Gemma 2, with exactly one OLM feature knob changed and nothing else."""
+    import dataclasses
+
+    return dataclasses.replace(
+        CASES_BY_NAME["gemma2"],
+        name=f"gemma2[{name}]",
+        build_olm=lambda: gemma2_module.build_olm(**overrides),
+    )
+
+
+def _qwen3_moe_without_qk_norm_permutation() -> ParityCase:
+    """Qwen3-MoE with the per-head QK-norm scales left in reference order."""
+    import dataclasses
+
+    from ._spec import MapEntry
+
+    case = CASES_BY_NAME["qwen3-moe"]
+
+    def broken_map(olm, hf) -> list[MapEntry]:
+        return [
+            (
+                dataclasses.replace(e, fn=None, grad_fn=None)
+                if (".q_norm.weight" in e.olm or ".k_norm.weight" in e.olm)
+                else e
+            )
+            for e in case.build_map(olm, hf)
+        ]
+
+    return dataclasses.replace(
+        case, name="qwen3-moe[qk-norm-unpermuted]", build_map=broken_map
+    )
+
+
+#: One mutation per feature the README lists as covered, with the relative logit
+#: difference measured on transformers 4.57.1 / torch 2.2.2 at the default
+#: ``WEIGHT_SCALE``. Each breaks a single feature and nothing else, so
+#: ``test_matches_reference`` must reject it. Without this, "Gemma 2's soft-caps
+#: are covered" means only that a case exists with soft-capping switched on --
+#: not that the comparison can see it. It could not: at the shipped init scale
+#: the attention soft-cap mutation measures 6.5e-7 relative, i.e. *passes*.
+FEATURE_MUTATIONS = [
+    (
+        "attention-logit-softcap",
+        _gemma2_with("no-attn-softcap", attn_logit_softcap=None),
+        1.6e-4,
+    ),
+    (
+        "final-logit-softcap",
+        _gemma2_with("no-final-softcap", final_logit_softcap=None),
+        5.0e-3,
+    ),
+    (
+        "query-pre-attn-scalar",
+        _gemma2_with("default-query-scale", query_pre_attn_scalar=None),
+        8.7e-2,
+    ),
+    ("sliding-window", _gemma2_with("window-off-by-one", sliding_window=9), 2.7e-1),
+    ("gelu-variant", CASES_BY_NAME["gemma2-stock"], 2.2e-4),
+    ("qk-norm-permutation", _qwen3_moe_without_qk_norm_permutation(), 3.2e-1),
+]
+
+
+@pytest.mark.parametrize(
+    "feature,case,measured",
+    FEATURE_MUTATIONS,
+    ids=[m[0] for m in FEATURE_MUTATIONS],
+)
+def test_advertised_feature_is_detectably_covered(
+    feature: str, case: ParityCase, measured: float
+) -> None:
+    """Breaking one advertised feature must fail the parity criterion.
+
+    Asserted against ``REL_LOGIT_TOL`` itself rather than a separate threshold,
+    so the two tests cannot drift apart: loosening the tolerance until a real
+    difference slips through fails here immediately.
+
+    float64 only. Every mutation below is at least 16x the tolerance and more
+    than two orders of magnitude above float32 rounding, so the dtype makes no
+    difference (checked: the two agree to three significant figures), and one
+    dtype keeps the suite at a few seconds.
+    """
+    result = run_parity(case, dtype=torch.float64)
+
+    assert result.rel_logit_diff > REL_LOGIT_TOL, (
+        f"breaking {feature} ({case.name}) left max |logit difference| / "
+        f"max |logit| at {result.rel_logit_diff:.3e}, within the "
+        f"{REL_LOGIT_TOL:.0e} the matching cases are held to, so the suite "
+        f"would not notice if OLM got this feature wrong. Measured "
+        f"{measured:.1e} when written; if OLM's behaviour changed "
+        "deliberately, update the case, not this bound."
+    )
+
+
 @pytest.mark.parametrize("case", ALL_CASES, ids=_ids)
 def test_reference_constants_are_randomized(case: ParityCase) -> None:
     """Norm scales and biases must not still be constant when we compare.
@@ -174,6 +300,32 @@ def test_reference_constants_are_randomized(case: ParityCase) -> None:
         f"{case.name}: parameters left at a constant value, so a permutation "
         f"error in them would be undetectable: {still_constant}"
     )
+
+
+def test_weight_scaling_touches_matrices_once_and_leaves_vectors_alone() -> None:
+    """Guard the scaling itself, including the tied-parameter trap.
+
+    With a tied embedding and output head the two names are one tensor, so
+    iterating duplicates would scale it by ``WEIGHT_SCALE ** 2`` and quietly
+    compare against a model that is not a multiple of the reference. Norm scales
+    and biases must be left alone: they are the parameters
+    ``randomize_degenerate_parameters`` has just jittered around 1 and 0, and
+    amplifying those is not the same experiment.
+    """
+    case = CASES_BY_NAME["llama2-mha-tied"]
+    torch.manual_seed(0)
+    hf = case.build_hf()
+    before = {n: p.detach().clone() for n, p in hf.named_parameters()}
+
+    scaled = scale_reference_weights(hf, factor=WEIGHT_SCALE)
+
+    assert "model.embed_tokens.weight" in scaled
+    for name, param in hf.named_parameters():
+        expected = before[name] * (WEIGHT_SCALE if param.dim() >= 2 else 1.0)
+        assert torch.equal(param.detach(), expected), (
+            f"{name} (dim {param.dim()}) was not scaled by exactly "
+            f"{'WEIGHT_SCALE' if param.dim() >= 2 else '1'}"
+        )
 
 
 def test_loss_is_computed_identically_for_both_models() -> None:

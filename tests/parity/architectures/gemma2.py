@@ -63,8 +63,16 @@ def _config(activation: str) -> Gemma2Config:
     )
 
 
-def _build_olm() -> Gemma2Model:
-    return Gemma2Model(
+def build_olm(**overrides) -> Gemma2Model:
+    """Build the OLM model, optionally with one feature knob changed.
+
+    The overrides exist for the negative-control tests, which break exactly one
+    advertised feature at a time and require parity to collapse. Taking them
+    here rather than restating the config in the test keeps the mutated model
+    identical to the real one in every other respect -- otherwise a "the suite
+    catches this" claim could rest on an unrelated difference.
+    """
+    kwargs = dict(
         vocab_size=VOCAB,
         embed_dim=EMBED,
         intermediate_size=INTERMEDIATE,
@@ -79,6 +87,11 @@ def _build_olm() -> Gemma2Model:
         final_logit_softcap=FINAL_SOFTCAP,
         query_pre_attn_scalar=QUERY_PRE_ATTN_SCALAR,
     )
+    unknown = set(overrides) - set(kwargs)
+    if unknown:
+        raise TypeError(f"not Gemma 2 parity config keys: {sorted(unknown)}")
+    kwargs.update(overrides)
+    return Gemma2Model(**kwargs)
 
 
 #: HF's Gemma2RMSNorm computes ``x_normed * (1 + weight)``; OLM's RMSNorm
@@ -147,7 +160,7 @@ CASES = [
         name="gemma2",
         reference="Gemma2ForCausalLM",
         build_hf=lambda: Gemma2ForCausalLM(_config("gelu")),
-        build_olm=_build_olm,
+        build_olm=build_olm,
         build_map=_build_map,
         notes=(
             "Sandwich norms, (1+w) norm scales, sqrt(hidden) embedding scale, "
@@ -162,7 +175,7 @@ CASES = [
         name="gemma2-stock",
         reference="Gemma2ForCausalLM (stock config)",
         build_hf=lambda: Gemma2ForCausalLM(_config("gelu_pytorch_tanh")),
-        build_olm=_build_olm,
+        build_olm=build_olm,
         build_map=_build_map,
         notes="Reference at its real default activation. Expected to disagree.",
     ),

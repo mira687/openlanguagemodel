@@ -19,6 +19,22 @@ SEED = 0
 BATCH = 2
 SEQ_LEN = 16
 
+#: Multiplier applied to the reference's matrix-shaped parameters before the
+#: comparison. At the shipped init (``initializer_range=0.02``, hidden size 64)
+#: the largest logit is around 1, and every non-linearity this suite advertises
+#: is then operating in a regime where breaking it barely moves the output:
+#: removing Gemma 2's attention soft-cap changes the logits by 2.7e-7, which is
+#: indistinguishable from float32 rounding. Scaling the weights moves the model
+#: into the non-linear regime, so "this feature is covered" becomes measurable.
+#:
+#: 5.0 is a measured choice, not a guess. At x5 every matching case still agrees
+#: to float32 rounding while the stock-GELU and soft-cap mutations are caught.
+#: At x10 some *correct* cases exceed an absolute 1e-5, and matching ``gpt2``
+#: fails the per-tensor gradient check on ``k_proj.bias``: that tensor's true
+#: gradient is exactly zero, so at x10 it rises out of DEGENERATE_GRAD_RATIO's
+#: cutoff and its rounding-noise direction starts being compared.
+WEIGHT_SCALE = 5.0
+
 
 # --------------------------------------------------------------------------
 # Determinism
@@ -95,6 +111,37 @@ def randomize_degenerate_parameters(
             param.copy_(param + noise * spread)
             touched.append(name)
     return touched
+
+
+def scale_reference_weights(
+    model: torch.nn.Module, factor: float = WEIGHT_SCALE, min_dim: int = 2
+) -> list[str]:
+    """Scale up the reference's matrix parameters, leaving its vectors alone.
+
+    Only parameters with at least ``min_dim`` axes are touched, i.e. projection
+    and embedding matrices but not norm scales or biases. Norm scales sit in
+    front of a normalisation, so scaling them would partly cancel; biases add a
+    constant offset rather than amplifying the signal. Restricting the change to
+    matrices is what makes the resulting logit growth roughly geometric in depth
+    and keeps every case's weights a plain multiple of what ``transformers``
+    initialised.
+
+    ``remove_duplicate=True`` matters: with a tied embedding/output head the two
+    names share one tensor, and iterating the duplicates would scale it twice.
+
+    Returns:
+        The names of the parameters that were scaled.
+    """
+    if factor == 1.0:
+        return []
+    scaled = []
+    with torch.no_grad():
+        for name, param in model.named_parameters(remove_duplicate=True):
+            if param.dim() < min_dim:
+                continue
+            param.mul_(factor)
+            scaled.append(name)
+    return scaled
 
 
 def check_coverage(
@@ -221,12 +268,32 @@ class ParityResult:
     min_per_tensor_grad_cosine: float
     worst_grad_tensor: str
     logit_scale: float
+    loss_scale: float
     n_params: int
     n_degenerate_grads: int = 0
     reference_deviations: tuple[str, ...] = ()
+    weight_scale: float = WEIGHT_SCALE
+
+    @property
+    def rel_logit_diff(self) -> float:
+        """Logit disagreement as a fraction of the reference's logit scale.
+
+        The absolute difference is meaningless on its own: it grows with the
+        init scale, the config and the platform. Divided by ``max |logit|`` it
+        is a statement about rounding, which is what the claim actually is.
+        """
+        return self.max_abs_logit_diff / self.logit_scale
+
+    @property
+    def rel_loss_diff(self) -> float:
+        """Loss disagreement as a fraction of the reference loss."""
+        return self.max_abs_loss_diff / self.loss_scale
 
     def as_dict(self) -> dict:
-        return asdict(self)
+        data = asdict(self)
+        data["rel_logit_diff"] = self.rel_logit_diff
+        data["rel_loss_diff"] = self.rel_loss_diff
+        return data
 
 
 def run_parity(
@@ -235,6 +302,7 @@ def run_parity(
     batch: int = BATCH,
     seq_len: int = SEQ_LEN,
     seed: int = SEED,
+    weight_scale: float = WEIGHT_SCALE,
 ) -> ParityResult:
     """Build both models from one config, share weights, and measure agreement."""
     set_determinism(seed)
@@ -243,6 +311,9 @@ def run_parity(
     olm = case.build_olm().to(dtype).eval()
 
     randomize_degenerate_parameters(hf, seed=seed + 2)
+    # After the jitter, so the scale applies to the values actually compared,
+    # and before the map, so OLM receives exactly these weights.
+    scale_reference_weights(hf, factor=weight_scale)
 
     entries = list(case.build_map(olm, hf))
     check_coverage(case, olm, hf, entries)
@@ -289,7 +360,9 @@ def run_parity(
         min_per_tensor_grad_cosine=worst_cos,
         worst_grad_tensor=worst_name,
         logit_scale=float(hf_logits.abs().max()),
+        loss_scale=float(hf_loss.abs()),
         n_params=sum(p.numel() for p in _named(olm).values()),
         n_degenerate_grads=len(degenerate),
         reference_deviations=case.reference_deviations,
+        weight_scale=weight_scale,
     )

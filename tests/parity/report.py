@@ -32,14 +32,26 @@ def to_markdown(rows: list[dict], env: dict[str, str]) -> str:
     out = ["# OLM reference-parity results", ""]
     out.append("| " + " | ".join(f"{k}: `{v}`" for k, v in env.items()) + " |")
     out.append("")
+    scales = sorted({r["weight_scale"] for r in rows})
     out.append(
-        "| architecture | reference | dtype | max abs logit diff | "
-        "max abs loss diff | grad cosine sim | worst per-param cosine |"
+        "Reference matrix weights scaled by "
+        + ", ".join(f"`x{s:g}`" for s in scales)
+        + " before comparison; see `_harness.WEIGHT_SCALE`."
     )
-    out.append("|---|---|---|---:|---:|---:|---:|")
+    out.append("")
+    # The relative columns come first because they are the reportable quantity:
+    # the absolute differences move with the init scale, the config and the
+    # platform, and are kept only so a reader can see the ulp-level size.
+    out.append(
+        "| architecture | reference | dtype | max abs dlogit / max abs logit | "
+        "max abs dloss / loss | max abs logit diff | max abs loss diff | "
+        "grad cosine sim | worst per-param cosine |"
+    )
+    out.append("|---|---|---|---:|---:|---:|---:|---:|---:|")
     for r in rows:
         out.append(
             f"| `{r['name']}` | {r['reference']} | {r['dtype']} | "
+            f"{r['rel_logit_diff']:.3e} | {r['rel_loss_diff']:.3e} | "
             f"{r['max_abs_logit_diff']:.3e} | {r['max_abs_loss_diff']:.3e} | "
             f"{r['grad_cosine_sim']:.12f} | {r['min_per_tensor_grad_cosine']:.9f} |"
         )
